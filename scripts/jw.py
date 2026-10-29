@@ -327,42 +327,149 @@ def cmd_grades(s, gpa=False, term=None):
     print(f"{'合计':<14}{len(eff):>6}{tc:>8.1f}{(tg/tc if tc else 0):>10.3f}")
 
 def cmd_timetable(s, term=None):
-    """课表单元格: class="kbcontent1" 是显示内容, class="kbcontent" 是隐藏详情"""
+    """课表 —— 解析成「星期 × 节次」二维表
+    页面结构: table#kbtable，首行 th 是星期一到星期日，
+    每行首个 th 是节次（第1.2节…），其余 td 是课程格子。
+    """
     url = BASE + "/xskb/xskb_list.do"
     if term:
         url += "?xnxq01id=" + term
     t = dec(s.get(url, timeout=25))
 
-    pat = re.compile(r'<div[^>]*class="kbcontent1"[^>]*>(.*?)</div>', re.S | re.I)
-    fontpat = re.compile(r"<font[^>]*title='([^']+)'[^>]*>(.*?)</font>", re.S | re.I)
-    fontpat2 = re.compile(r'<font[^>]*title="([^"]+)"[^>]*>(.*?)</font>', re.S | re.I)
-
-    seen, out = set(), []
-    for b in pat.findall(t):
-        for fp in (fontpat, fontpat2):
-            for m in fp.finditer(b):
-                b = b.replace(m.group(0), m.group(1) + ": " + m.group(2))
-        b = re.sub(r"<br\s*/?>", "\n", b, flags=re.I)
-        lines = [re.sub(r"\s+", " ", html.unescape(re.sub(r"<[^>]+>", "", x))).strip()
-                 for x in b.split("\n")]
-        lines = [x for x in lines if x and x != "\xa0"]
-        if not lines:
-            continue
-        key = "|".join(lines)
-        if key in seen:
-            continue
-        seen.add(key)
-        out.append(lines)
-
-    if not out:
-        print("  课表为空，检查学期参数格式（如 2026-2027-1）")
+    tb = re.search(r'<table[^>]*id="kbtable"[^>]*>(.*?)</table>', t, re.S | re.I)
+    if not tb:
+        if "未查询到数据" in t:
+            print("  没有课表数据（可能该学期无课，或学期参数不对）")
+        else:
+            print("  课表解析失败，请确认学期格式如 2026-2027-1")
         return
-    print("  共 %d 个课程时段\n" % len(out))
-    for i, lines in enumerate(out, 1):
-        print("  [%d] %s" % (i, lines[0]))
-        for x in lines[1:]:
-            print("      " + x)
+    html_tb = tb.group(1)
+
+    # 星期表头
+    head = re.search(r"<tr[^>]*>(.*?)</tr>", html_tb, re.S | re.I)
+    days = [re.sub(r"\s+", "", re.sub(r"<[^>]+>", "", x))
+            for x in re.findall(r"<th[^>]*>(.*?)</th>", head.group(1), re.S | re.I)]
+    days = [d for d in days if d and d != "&nbsp;"]
+    if not days:
+        days = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
+
+    rows = re.findall(r"<tr[^>]*>(.*?)</tr>", html_tb, re.S | re.I)[1:]
+    grid = []           # [(节次, {星期索引: [课程...]})]
+    for tr in rows:
+        ths = re.findall(r"<th[^>]*>(.*?)</th>", tr, re.S | re.I)
+        period = re.sub(r"\s+|&nbsp;", "", re.sub(r"<[^>]+>", "", ths[0])) if ths else ""
+        tds = re.findall(r"<td[^>]*>(.*?)</td>", tr, re.S | re.I)
+        cell_map = {}
+        for di, td in enumerate(tds):
+            divs = re.findall(r'<div[^>]*class="kbcontent1"[^>]*>(.*?)</div>', td, re.S | re.I)
+            items = []
+            for b in divs:
+                for fp in (re.compile(r"<font[^>]*title='([^']+)'[^>]*>(.*?)</font>", re.S | re.I),
+                           re.compile(r'<font[^>]*title="([^"]+)"[^>]*>(.*?)</font>', re.S | re.I)):
+                    for m in fp.finditer(b):
+                        b = b.replace(m.group(0), chr(1) + m.group(1) + chr(2) + m.group(2))
+                b = re.sub(r"<br\s*/?>", "\n", b, flags=re.I)
+                lines = [re.sub(r"\s+", " ", html.unescape(re.sub(r"<[^>]+>", "", x))).strip()
+                         for x in b.split("\n")]
+                lines = [x.replace(chr(1), "").replace(chr(2), ": ") for x in lines if x and x != "\xa0"]
+                # 拆开同一格里多门课（用 --- 分隔）
+                cur = []
+                for x in lines:
+                    if re.match(r"^-{5,}$", x):
+                        if cur: items.append(cur); cur = []
+                    else:
+                        cur.append(x)
+                if cur: items.append(cur)
+            if items:
+                cell_map[di] = items
+        if cell_map or period:
+            grid.append((period, cell_map))
+
+    if not grid:
+        print("  课表为空")
+        return
+
+    total = sum(len(v) for _, cm in grid for v in cm.values())
+    print(f"  {term or '本学期'} · 共 {total} 个课程时段\n")
+
+    # 按星期输出
+    for di, day in enumerate(days):
+        slots = []
+        for period, cm in grid:
+            if di in cm:
+                for item in cm[di]:
+                    slots.append((period, item))
+        if not slots:
+            continue
+        print(f"  【{day}】")
+        for period, item in slots:
+            name = item[0]
+            room, weeks = "", ""
+            others = []
+            for x in item[1:]:
+                if "教室" in x:
+                    room = x.split(": ", 1)[-1]
+                elif "周次" in x:
+                    weeks = x.split(": ", 1)[-1]
+                    # 去掉开头的班级名，只留周次
+                    m = re.search(r"(\d[\d,\-]*(?:\(全部\))?)$", weeks)
+                    if m: weeks = m.group(1)
+                else:
+                    others.append(x)
+            print(f"    {period:<10}{name}")
+            info = "  ".join(v for v in (weeks, room) if v)
+            if info:
+                print(f"    {'':<10}{info}")
+            for o in others:
+                print(f"    {'':<10}{o}")
         print()
+
+
+def cmd_hours(s, term=None):
+    """学时统计 —— 按课程/按学期汇总"""
+    r = s.post(BASE + "/kscj/cjcx_list",
+               data={"kksj": term or "", "kcxz": "", "kcmc": "", "xsfs": "all"}, timeout=25)
+    t = dec(r)
+    recs = []
+    for tr in re.findall(r"<tr[^>]*>(.*?)</tr>", t, flags=re.S | re.I):
+        cs = [re.sub(r"\s+", " ", html.unescape(re.sub(r"<[^>]+>", "", x))).strip()
+              for x in re.findall(r"<t[dh][^>]*>(.*?)</t[dh]>", tr, re.S | re.I)]
+        cs = [c for c in cs if c]
+        r_ = align_grade_row(cs)
+        if r_: recs.append(r_)
+    # 去重：同课号取一次
+    best = {}
+    for r_ in recs:
+        k = (r_["term"], r_["code"])
+        try: g = float(r_["gpa"])
+        except Exception: g = -1
+        if k not in best or g > best[k][0]:
+            best[k] = (g, r_)
+    eff = [v[1] for v in best.values()]
+    if not eff:
+        print("  没有成绩记录")
+        return
+
+    def num(x):
+        try: return float(x)
+        except Exception: return 0.0
+
+    print(f"{'学期':<14}{'课程':<26}{'学分':>6}{'学时':>6}")
+    print("-" * 52)
+    terms = sorted({x["term"] for x in eff})
+    grand = 0.0
+    for tm in terms:
+        rs = [x for x in eff if x["term"] == tm]
+        sub = 0.0
+        for x in rs:
+            h = num(x["hours"])
+            sub += h
+            print(f"{x['term']:<14}{x['name'][:24]:<26}{num(x['credit']):>6.1f}{h:>6.0f}")
+        print(f"{'':<14}{'小计':<26}{sum(num(x['credit']) for x in rs):>6.1f}{sub:>6.0f}")
+        print()
+        grand += sub
+    print("-" * 52)
+    print(f"{'合计':<14}{len(eff)} 门{'':<19}{sum(num(x['credit']) for x in eff):>6.1f}{grand:>6.0f}")
 
 
 def cmd_missing(s):
@@ -534,7 +641,7 @@ def cmd_grab(s, at=None, want=None, credit=None):
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("cmd", choices=["login", "alive", "keepalive", "info", "grades",
-                                    "timetable", "exams", "progress", "missing", "rounds", "grab", "doctor"])
+                                    "timetable", "exams", "progress", "missing", "hours", "rounds", "grab", "doctor"])
     ap.add_argument("arg", nargs="?", default=None, help="学期参数")
     ap.add_argument("-u", "--user"); ap.add_argument("-p", "--pwd")
     ap.add_argument("--gpa", action="store_true")
@@ -573,5 +680,6 @@ if __name__ == "__main__":
      "exams": lambda: cmd_exams(s, term),
      "progress": lambda: cmd_progress(s),
      "missing": lambda: cmd_missing(s),
+     "hours": lambda: cmd_hours(s, term),
      "rounds": lambda: cmd_rounds(s),
      "grab": lambda: cmd_grab(s, a.at, a.want, a.credit)}[a.cmd]()

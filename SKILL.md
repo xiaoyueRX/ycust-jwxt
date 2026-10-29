@@ -74,6 +74,7 @@ POST /xk/LoginToXk   body: encoded=...&jzmmid=1
 | 考试安排 | GET | `xsks/xsksap_query` | 表单页 |
 | 考试安排列表 | POST | `xsks/xsksap_list` | `xnxq01id=&xqlb=` |
 | **未获得学分** | POST | `kscj/whdxfcx_list` | `kksj=&kcxz=&kcmc=` |
+| 学时 | POST | `kscj/cjcx_list` | 取「总学时」列 |
 | 实践环节 | POST | `syjx/findSyYyKc.do` | 空 |
 | 预选选课 | POST | `xkgl/xsyxxk` | — |
 | 辅修报名 | POST | `fxgl/fxbmxx` | — |
@@ -96,7 +97,21 @@ python3 /skills/ycust-jwxt/scripts/jw.py grades --gpa
 python3 /skills/ycust-jwxt/scripts/jw.py timetable 2026-2027-1
 ```
 
-课表在 `td.kbcontent` 里，用 `---------------------` 分隔多个时段。
+输出按**星期 × 节次**组织（从 `table#kbtable` 解析：首行 th 是星期一到星期日，每行首个 th 是节次）。
+
+关键点：课表是二维表，**必须保留行列位置**。只抓 `kbcontent` 内容会丢掉「周几第几节」，输出一堆没有位置的课名，等于没用。
+
+同一格多门课用 `-----------------` 分隔，要拆开。
+
+### 2.5 查学时
+
+```bash
+python3 /skills/ycust-jwxt/scripts/jw.py hours
+```
+
+来自成绩单的「总学时」列，按学期汇总。
+
+注意：实训类课程的「总学时」有时填的是**周数或天数**（如金工实训=1、军事技能训练=3），不是真实课时，这是学校数据本身的问题，不是解析错误。
 
 ### 3. 查还差多少学分
 

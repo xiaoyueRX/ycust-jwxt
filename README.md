@@ -1,19 +1,14 @@
-# 银川科技学院教务系统 Skill
+# ycust-jwxt
 
-一个用于 [银川科技学院](https://www.ycust.com) 强智科技教务系统（`jw.ycust.com/yckjxy_jsxsd`）的 Agent Skill，包含完整接口手册和命令行工具。
+银川科技学院（YCUST）强智科技教务系统的 Agent Skill，提供接口手册与命令行工具。
 
-## 它能做什么
+## 功能
 
-| 功能 | 命令 |
-|---|---|
-| 查学籍信息 | `jw.py info` |
-| 查成绩 / 算加权绩点 | `jw.py grades --gpa` |
-| 查课表 | `jw.py timetable 2026-2027-1` |
-| 查考试安排 | `jw.py exams` |
-| 查还差多少学分 | `jw.py missing` |
-| 对照培养方案查完成度 | `jw.py progress` |
-| 选课轮次 | `jw.py rounds` |
-| 抢课 | `jw.py grab --at 12:00:00 --want "课程A,课程B"` |
+- 成绩与加权绩点
+- 课表、考试安排
+- 学籍与培养方案
+- 学分缺口（官方「未获得学分」口径）
+- 选课与抢课
 
 ## 安装
 
@@ -21,11 +16,11 @@
 pip install requests
 ```
 
-把整个目录放到 Agent 的 skills 目录下（通常是 `/skills/ycust-jwxt/`），然后在扩展面板里启用。
+将本目录放入 Agent 的 skills 目录，通常为 `/skills/ycust-jwxt/`，然后在扩展面板中启用。
 
-## 首次使用
+## 使用
 
-**这个仓库不含任何账号密码。** 第一次运行会让你输入学号密码：
+首次运行需要提供学号与密码：
 
 ```bash
 python3 scripts/jw.py login
@@ -38,44 +33,29 @@ python3 scripts/jw.py login
   请提供你的学号与密码（仅本次会话使用，不写入磁盘）
 
   学号: 2024xxxxxx
-  密码: 
+  密码:
 ```
 
-登录成功后 session 存在 `/workspace/.jw_session.txt`，之后所有命令自动复用，不再需要密码。
+登录后 session 保存在 `/workspace/.jw_session.txt`，后续命令自动复用，不再需要密码。
 
-## 核心经验
-
-### 别在抢课高峰登录
-
-12:00 全校同时涌入时，登录接口（要查库验证密码）最先被打爆，浏览器会直接卡死。正确做法是提前登录、复用 session、用 6 字节的 `framework/blankPage.jsp` 保活。
-
-浏览器一次完整选课要发 30+ 请求（登录+框架+菜单+图片+JS+列表），脚本只要 1~2 个。
-
-### 成绩要按绩点去重
-
-重修会留下多条记录（同一门课出现 35、45、60 三行）。不去重会导致学分重复累加、绩点被拉低。
-
-### 表头 12 列，数据行 11 列
-
-`cjcx_list` 的「成绩标志」列为空时会被过滤，直接按位置取值会整体错位。脚本用「从右往左」定位稳定字段来规避。
-
-### 「非法访问」不是 bug
-
-选课未开放时 `xsxk/*` 全部返回 772 字节的错误页，这是正常的轮次校验。
-
-## 项目结构
-
-```
-SKILL.md              主文档（给 Agent 读）
-references/api.md     完整接口清单 + 探测方法
-scripts/jw.py         命令行工具
+```bash
+python3 scripts/jw.py grades --gpa            # 成绩 + 加权绩点
+python3 scripts/jw.py timetable 2026-2027-1   # 课表
+python3 scripts/jw.py missing                 # 还差多少学分
+python3 scripts/jw.py grab --at 12:00:00 --want "课程A,课程B"
 ```
 
-`references/api.md` 里记录了**如何从 `xsMain.jsp` 逐层扒出新接口**的方法，学校更新功能后可以照着复现。
+完整命令见 `python3 scripts/jw.py --help`。
+
+## 说明
+
+抢课前建议先运行 `login` 提前建立 session。12:00 选课高峰时登录接口压力最大，复用 session 可以跳过这一步。
+
+接口清单与字段说明见 [references/api.md](references/api.md)。
 
 ## 免责声明
 
-仅供个人学习与查询自己的教务数据使用。请勿用于批量爬取、代他人查询或任何违反学校规定的用途。使用本工具产生的任何后果由使用者自行承担。
+仅供查询本人教务数据使用。请勿用于批量爬取或代他人查询。
 
 ## License
 

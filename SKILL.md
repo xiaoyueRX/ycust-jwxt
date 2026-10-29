@@ -81,6 +81,23 @@ POST /xk/LoginToXk   body: encoded=...&jzmmid=1
 
 完整字段、响应结构和坑，见 [接口详解](references/api.md)。
 
+## 命令一览
+
+| 命令 | 作用 |
+|---|---|
+| `doctor` | 环境自检 |
+| `login` / `alive` / `keepalive` | 登录与保活 |
+| `info` | 学籍卡片（14 个字段，身份证默认打码，`--raw` 显示） |
+| `grades [--gpa]` | 成绩单 / 加权绩点 |
+| `timetable [学期]` | 课表（星期 × 节次） |
+| `hours` | 学时统计 |
+| `exams` | 考试安排 |
+| `missing` | 官方未获得学分 |
+| `progress` | 对照培养方案 |
+| `calendar` | 教学周历（含节假日） |
+| `page <关键字>` | **通用页面抓取** |
+| `rounds` / `grab` | 选课轮次 / 抢课 |
+
 ## 四件常用事
 
 ### 1. 查成绩 / 算绩点
@@ -127,6 +144,18 @@ python3 /skills/ycust-jwxt/scripts/jw.py progress   # 自己比对培养方案
 `progress` 是把 `pyfa/topyfamx` 与成绩单按**课程名称**比对（两边课号体系不同，只能按名称）。它作为交叉验证用。
 
 注意 `missing` 返回里同一门课会出现多次（「形势与政策」从大一到毕业共 8 条），按课程名去重后再看。
+
+### 3.5 其他页面
+
+```bash
+python3 /skills/ycust-jwxt/scripts/jw.py page          # 列出可查页面
+python3 /skills/ycust-jwxt/scripts/jw.py page 公告
+python3 /skills/ycust-jwxt/scripts/jw.py page 执行计划
+```
+
+覆盖：周历、学籍、实践、评价、交流、执行计划、方案、公告、留言、进度、社会考试、预选、辅修、教材、实验课表、班级课表。
+
+**不要为每个页面单独写命令**——`page <关键字>` 是通用抓取，表格直接输出。只有需要特殊处理（如课表二维、成绩去重）才值得专门实现。
 
 ### 4. 抢课
 

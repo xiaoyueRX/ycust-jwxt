@@ -43,6 +43,7 @@ def _workdir():
             return d
     return os.path.dirname(os.path.abspath(__file__))
 
+RAW   = False          # --raw 时显示身份证等敏感字段
 WD    = _workdir()
 CK    = os.path.join(WD, ".jw_session.txt")
 UA    = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -275,13 +276,92 @@ def cmd_doctor(s=None):
     return 0 if ok else 1
 
 
+# 学籍卡片里的字段名（用于识别「这是标签不是值」）
+_INFO_KEYS = {
+    "院系", "专业", "学制", "班级", "学号", "姓名", "性别", "姓名拼音",
+    "出生日期", "婚否", "本人电话", "专业方向", "政治面貌", "籍贯",
+    "入党团时间", "民族", "学习形式", "学习层次", "外语种类",
+    "家庭现住址", "下车火车站", "邮政编码", "家庭电话", "联系人",
+    "入学日期", "毕业日期", "入学考号", "身份证编号", "考生号",
+}
+# 这些是分节标题，遇到就停
+_INFO_SECTIONS = {"学 习 及 工 作 简 历", "家 庭 成 员 情 况",
+                  "学 籍 变 动 情 况", "奖 励 情 况", "处 分 情 况", "学 籍 卡 片"}
+
+
 def cmd_info(s):
-    t = dec(s.get(BASE + "/grxx/xsxx", timeout=20))
-    flat = re.sub(r"\s+", " ", strip(t))
-    for kw in ("院系", "专业", "班级", "学号", "姓名", "性别", "出生日期", "培养层次"):
-        m = re.search(kw + r"[：:]\s*([^\x01]{1,30})", flat)
-        if m: print(f"  {kw:6}: {m.group(1).strip()}")
-    m = re.search(r"学\s*籍\s*卡\s*片", flat)
+    """学籍卡片 —— 解析成键值对"""
+    t = dec(s.get(BASE + "/grxx/xsxx", timeout=25))
+
+    # 只取含「学籍卡片」的那张表
+    tb = None
+    for cand in re.findall(r"<table[^>]*>.*?</table>", t, flags=re.S | re.I):
+        if "姓名" in cand and ("院系" in cand or "学号" in cand):
+            tb = cand
+            break
+    if not tb:
+        print("  学籍卡片解析失败（页面结构可能变了）")
+        return
+
+    info = {}
+    for tr in re.findall(r"<tr[^>]*>(.*?)</tr>", tb, flags=re.S | re.I):
+        cells = [re.sub(r"\s+", " ", html.unescape(re.sub(r"<[^>]+>", "", x))).strip()
+                 for x in re.findall(r"<t[dh][^>]*>(.*?)</t[dh]>", tr, flags=re.S | re.I)]
+        cells = [c.replace("\xa0", " ").strip() for c in cells]
+
+        # 停在各分节标题
+        if any(re.sub(r"\s+", "", c) in _INFO_SECTIONS for c in cells if c):
+            if cells[0] and re.sub(r"\s+", "", cells[0]) in _INFO_SECTIONS:
+                break
+
+        # 「院系：xxx」这种自带冒号的形式
+        for c in cells:
+            for m in re.finditer(r"([\u4e00-\u9fa5]{2,8})\s*[：:]\s*([^：:]*)", c):
+                k, v = m.group(1), m.group(2).strip()
+                if k in _INFO_KEYS and v:
+                    info[k] = v
+
+        # 键值成对：标签格后面跟值格
+        i = 0
+        while i < len(cells):
+            c = cells[i]
+            key = re.sub(r"\s+", "", c)
+            if key in _INFO_KEYS and i + 1 < len(cells):
+                val = cells[i + 1].strip()
+                if val and re.sub(r"\s+", "", val) not in _INFO_KEYS and key not in info:
+                    info[key] = val
+                i += 2
+            else:
+                i += 1
+
+    if not info:
+        print("  未解析到字段")
+        return
+
+    order = ["院系", "专业", "学制", "班级", "学号", "姓名", "性别", "姓名拼音",
+             "出生日期", "民族", "政治面貌", "籍贯", "婚否", "入学日期", "毕业日期",
+             "学习层次", "学习形式", "外语种类", "入党团时间", "专业方向",
+             "本人电话", "家庭电话", "联系人", "家庭现住址", "下车火车站",
+             "邮政编码", "入学考号"]
+
+    # 敏感字段默认打码，加 --raw 才显示完整
+    SENSITIVE = {"身份证编号", "入学考号", "本人电话", "家庭电话", "邮政编码", "家庭现住址"}
+
+    def mask(k, v):
+        # 非敏感字段、或显式 --raw，都原样返回
+        if RAW or k not in SENSITIVE:
+            return v
+        if k in ("身份证编号", "本人电话", "家庭电话") and len(v) > 8:
+            return v[:4] + "*" * (len(v) - 8) + v[-4:]
+        return v
+
+    for k in order:
+        if k in info:
+            print(f"  {k:<8}{mask(k, info[k])}")
+    for k, v in info.items():
+        if k not in order:
+            print(f"  {k:<8}{mask(k, v)}")
+
 
 def cmd_grades(s, gpa=False, term=None):
     data = {"kksj": term or "", "kcxz": "", "kcmc": "", "xsfs": "all"}
@@ -472,6 +552,91 @@ def cmd_hours(s, term=None):
     print(f"{'合计':<14}{len(eff)} 门{'':<19}{sum(num(x['credit']) for x in eff):>6.1f}{grand:>6.0f}")
 
 
+def cmd_calendar(s, term=None):
+    """教学周历 —— 每周边号与日期，含节假日备注"""
+    t = dec(s.get(BASE + "/jxzl/jxzl_query", timeout=25))
+    rows = []
+    for tr in re.findall(r"<tr[^>]*>(.*?)</tr>", t, flags=re.S | re.I):
+        cs = [re.sub(r"\s+", " ", html.unescape(re.sub(r"<[^>]+>", "", x))).strip()
+              for x in re.findall(r"<t[dh][^>]*>(.*?)</t[dh]>", tr, flags=re.S | re.I)]
+        cs = [c for c in cs if c]
+        if cs and (cs[0].isdigit() or cs[0] == "星期一"):
+            rows.append(cs)
+    if not rows:
+        print("  没有周历数据")
+        return
+    head = rows[0]
+    body = [r for r in rows[1:] if r[0].isdigit()]
+    print(f"  教学周历  共 {len(body)} 周\n")
+    print(f"  {'周':<4}{'周一':<8}{'周二':<8}{'周三':<8}{'周四':<8}{'周五':<8}{'周六':<12}{'周日':<12}备注")
+    for r in body:
+        g = lambda i: r[i] if i < len(r) else ""
+        # 周六周日带月份，其余只有日
+        note = r[8] if len(r) > 8 else ""
+        print(f"  {g(0):<4}{g(1):<8}{g(2):<8}{g(3):<8}{g(4):<8}{g(5):<8}{g(6):<12}{g(7):<12}{note}")
+
+
+def cmd_page(s, key=None):
+    """通用页面抓取 —— 直接看某个菜单页的表格内容
+    用法: jw.py page <关键字>   如 page 公告 / page 评价 / page 实践
+    """
+    PAGES = {
+        "周历": "/jxzl/jxzl_query",     "桌面": "/jxzl/jxzl_query",
+        "学籍": "/xsxj/xjxxgl.do",
+        "实践": "/view/syjx/syyy_find.jsp",
+        "评价": "/xspj/xspj_find.do",    "评教": "/xspj/xspj_find.do",
+        "交流": "/jlsgl/jlxm_find.do",
+        "执行计划": "/pyfa/pyfa_query",
+        "方案": "/pyfa/topyfamx",
+        "公告": "/ggly/ysgg_query",
+        "留言": "/ggly/ysly_query",
+        "进度": "/xkgl/skjhQuery.do",
+        "社会考试": "/xsdjks/xsdjks_list",
+        "预选": "/xkgl/xsyxgl",
+        "辅修": "/fxgl/fxbmxx_query",
+        "教材": "/xsjc/xsjc",
+        "实验课表": "/syjx/toXskb.do",
+        "班级课表": "/kbcx/kbxx_xzb",
+    }
+    if not key:
+        print("  可用页面：")
+        for k in PAGES:
+            print(f"    {k}")
+        return
+    hit = None
+    for k, v in PAGES.items():
+        if key in k or k in key:
+            hit = (k, v); break
+    if not hit:
+        print(f"  未找到页面「{key}」，可用：{' '.join(PAGES)}")
+        return
+    label, path = hit
+    t = dec(s.get(BASE + path, timeout=25))
+    print(f"  {label}  {path}  ({len(t)} 字节)\n")
+
+    tables = re.findall(r"<table[^>]*>.*?</table>", t, flags=re.S | re.I)
+    shown = 0
+    for tb in tables:
+        rows = []
+        for tr in re.findall(r"<tr[^>]*>(.*?)</tr>", tb, flags=re.S | re.I):
+            cs = [re.sub(r"\s+", " ", html.unescape(re.sub(r"<[^>]+>", "", x))).strip()
+                  for x in re.findall(r"<t[dh][^>]*>(.*?)</t[dh]>", tr, flags=re.S | re.I)]
+            cs = [c for c in cs if c]
+            if cs: rows.append(cs)
+        if len(rows) < 2: continue
+        shown += 1
+        head = rows[0]
+        print("  " + " | ".join(head))
+        print("  " + "-" * min(60, len(" | ".join(head)) * 2))
+        for r in rows[1:13]:
+            print("  " + " | ".join(r))
+        if len(rows) > 13:
+            print(f"  ... 另有 {len(rows)-13} 行")
+        print()
+    if not shown:
+        print("  （页面无表格数据）")
+
+
 def cmd_missing(s):
     """未获得学分/未修课程 —— 比 progress 更官方、更直接"""
     r = s.post(BASE + "/kscj/whdxfcx_list",
@@ -641,13 +806,15 @@ def cmd_grab(s, at=None, want=None, credit=None):
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("cmd", choices=["login", "alive", "keepalive", "info", "grades",
-                                    "timetable", "exams", "progress", "missing", "hours", "rounds", "grab", "doctor"])
+                                    "timetable", "exams", "progress", "missing", "hours", "calendar", "page", "rounds", "grab", "doctor"])
     ap.add_argument("arg", nargs="?", default=None, help="学期参数")
     ap.add_argument("-u", "--user"); ap.add_argument("-p", "--pwd")
     ap.add_argument("--gpa", action="store_true")
     ap.add_argument("--term")
     ap.add_argument("--at"); ap.add_argument("--want"); ap.add_argument("--credit", type=float)
+    ap.add_argument("--raw", action="store_true", help="显示身份证等敏感字段的完整值")
     a = ap.parse_args()
+    globals()["RAW"] = a.raw
 
     s = newsess()
 
@@ -681,5 +848,7 @@ if __name__ == "__main__":
      "progress": lambda: cmd_progress(s),
      "missing": lambda: cmd_missing(s),
      "hours": lambda: cmd_hours(s, term),
+     "calendar": lambda: cmd_calendar(s, term),
+     "page": lambda: cmd_page(s, term),
      "rounds": lambda: cmd_rounds(s),
      "grab": lambda: cmd_grab(s, a.at, a.want, a.credit)}[a.cmd]()

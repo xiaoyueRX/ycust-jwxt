@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.jw_session.txt
+.jw_cred_disabled
+.jw_last_page.html
+*.log
+.env

@@ -8,6 +8,14 @@ compatibility: 需要 python3 与 requests（pip install requests）。在工作
 
 覆盖 `http://jw.ycust.com/yckjxy_jsxsd/` 的完整接口。**所有路径都相对于这个 base**。
 
+## 装不上/用不了？先跑自检
+
+```bash
+python3 /skills/ycust-jwxt/scripts/jw.py doctor
+```
+
+会检查 python、requests、工作目录权限、网络连通性、文件完整性，以及最常见的**目录嵌套**错误（`/skills/ycust-jwxt/ycust-jwxt/`）。报错时先看这个输出。
+
 ## 首次使用：必须先向用户索取账号密码
 
 **这个 skill 不含任何预置凭据。** 第一次使用时（`/workspace/.jw_session.txt` 不存在或已失效），必须先向用户询问：
@@ -19,6 +27,8 @@ compatibility: 需要 python3 与 requests（pip install requests）。在工作
 **不要**把密码写进任何文件、环境变量或记忆。session 存在 `/workspace/.jw_session.txt` 后，后续调用会自动复用，不再需要密码。
 
 如果用户拒绝提供密码，只能提示他手动登录后自行截图/复制内容给你，不要尝试绕过。
+
+**工作目录是自适应的**：脚本优先用 `/workspace`，不可写时退回 `$HOME`，也可用环境变量 `WORKSPACE_DIR` 指定。不依赖固定路径。
 
 ## 登录方式特殊
 

@@ -20,11 +20,19 @@ from datetime import datetime
 import requests
 
 BASE  = "http://jw.ycust.com/yckjxy_jsxsd"
-CK    = "/workspace/.jw_session.txt"
+# 会话文件位置：优先用工作区，取不到就退回脚本所在目录
+def _workdir():
+    for d in (os.environ.get("WORKSPACE_DIR"), "/workspace", os.path.expanduser("~")):
+        if d and os.path.isdir(d) and os.access(d, os.W_OK):
+            return d
+    return os.path.dirname(os.path.abspath(__file__))
+
+WD    = _workdir()
+CK    = os.path.join(WD, ".jw_session.txt")
 UA    = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
          "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
 # 凭据不落盘、不读环境变量。首次使用时必须由用户当场提供。
-CRED_FILE = "/workspace/.jw_cred_disabled"   # 仅作存在性检测，永不写入
+CRED_FILE = os.path.join(WD, ".jw_cred_disabled")   # 仅作存在性检测，永不写入
 
 # ---------------- 基础设施 ----------------
 
@@ -82,8 +90,14 @@ def ask_credentials(user=None, pwd=None):
             if not user:
                 user = input("  学号: ").strip()
             if not pwd:
-                import getpass
-                pwd = getpass.getpass("  密码: ").strip()
+                try:
+                    import getpass, sys as _s
+                    if _s.stdin.isatty():
+                        pwd = getpass.getpass("  密码: ").strip()
+                    else:
+                        pwd = input("  密码: ").strip()
+                except Exception:
+                    pwd = input("  密码: ").strip()
         except (EOFError, KeyboardInterrupt):
             print("\n已取消")
             return None, None
@@ -169,6 +183,60 @@ def align_grade_row(cs):
 
 
 # ---------------- 各功能 ----------------
+
+def cmd_doctor(s=None):
+    """自检：环境、依赖、网络、路径"""
+    import platform
+    ok = True
+    print("  环境自检")
+    print("  " + "-" * 42)
+    print(f"  python   {platform.python_version()}  ({platform.system()})")
+    print(f"  工作目录 {WD}")
+    print(f"  会话文件 {CK}")
+    print(f"  可写     {'✅' if os.access(WD, os.W_OK) else '❌ 无写权限'}")
+
+    try:
+        import requests as _r
+        print(f"  requests {_r.__version__}  ✅")
+    except ImportError:
+        print("  requests   ❌ 未安装，请执行: pip install requests")
+        ok = False
+
+    # 网络
+    for host, label in ((BASE, "教务系统"), ("appdmkj.5idream.net", "（备用）")):
+        try:
+            import requests as _r
+            r = _r.get(host + "/", timeout=8, allow_redirects=True)
+            print(f"  连通性   {label} HTTP {r.status_code}  ✅")
+            break
+        except Exception as e:
+            print(f"  连通性   {label} ❌ {type(e).__name__}")
+            ok = False
+
+    # 技能完整性
+    here = os.path.dirname(os.path.abspath(__file__))
+    need = [os.path.join(here, "jw.py"),
+            os.path.join(os.path.dirname(here), "SKILL.md"),
+            os.path.join(os.path.dirname(here), "references", "api.md")]
+    for p in need:
+        print(f"  {'✅' if os.path.exists(p) else '❌'} {os.path.relpath(p, os.path.dirname(here))}")
+        if not os.path.exists(p): ok = False
+
+    # 目录嵌套检测：SKILL.md 所在目录名应等于技能名
+    skilldir = os.path.dirname(here)
+    base = os.path.basename(os.path.dirname(skilldir))
+    if base == "ycust-jwxt" and os.path.basename(skilldir) == "ycust-jwxt":
+        print("  ⚠️  检测到目录嵌套：.../ycust-jwxt/ycust-jwxt/SKILL.md")
+        print("     应把内层内容上移一层，或在 clone 时指定完整目标路径")
+        ok = False
+
+    print()
+    if ok:
+        print("  ✅ 一切正常，可以直接使用")
+    else:
+        print("  ⚠️  存在上述问题，请先修复")
+    return 0 if ok else 1
+
 
 def cmd_info(s):
     t = dec(s.get(BASE + "/grxx/xsxx", timeout=20))
@@ -406,7 +474,7 @@ def cmd_grab(s, at=None, want=None, credit=None):
                     r = s.get(u, timeout=12, headers={"Referer": BASE + "/xsxk/xklc_list"})
                     page = dec(r)
                     if len(page) < 800 or "非法访问" in page: continue
-                    open("/workspace/.jw_last_page.html", "w", encoding="utf-8").write(page)
+                    open(os.path.join(WD, ".jw_last_page.html"), "w", encoding="utf-8").write(page)
                     print(f"  轮次{rid} 页面已存档，{len(page)} 字节")
                     for nm in names:
                         for tr in re.findall(r"<tr[^>]*>(.*?)</tr>", page, re.S | re.I):
@@ -429,7 +497,7 @@ def cmd_grab(s, at=None, want=None, credit=None):
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("cmd", choices=["login", "alive", "keepalive", "info", "grades",
-                                    "timetable", "exams", "progress", "missing", "rounds", "grab"])
+                                    "timetable", "exams", "progress", "missing", "rounds", "grab", "doctor"])
     ap.add_argument("arg", nargs="?", default=None, help="学期参数")
     ap.add_argument("-u", "--user"); ap.add_argument("-p", "--pwd")
     ap.add_argument("--gpa", action="store_true")
@@ -438,6 +506,9 @@ if __name__ == "__main__":
     a = ap.parse_args()
 
     s = newsess()
+
+    if a.cmd == "doctor":
+        sys.exit(cmd_doctor())
 
     if a.cmd == "login":
         ok = do_login(s, a.user, a.pwd)

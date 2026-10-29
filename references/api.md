@@ -157,8 +157,23 @@ GET /xsks/xsksap_query
 | 课程课表 | `kbcx/kbxx_kc` |
 | 教材账目 | `xsjc/xsjc` |
 | 辅修报名 | `fxgl/fxbmxx_query` |
+| 社会考试报名 | `xsdjks/xsdjks_list` |
 | 学生预选 | `xkgl/xsyxgl` |
 | 重修报名选课 | `xsks/xsksap_query` 同级菜单内 |
+
+## 8.5 社会考试报名
+
+```
+GET /xsdjks/xsdjks_list
+```
+
+页面含两张表：
+1. **可报名的社会考试**：序号 / 考级课程名称 / 考级等级名称 / 考试时间 / 报名金额 / 操作
+2. **已报名课程**：考级等级 / 考级课程 / 考级时间 / 金额 / 考级准考证号 / 原准考证号 / 报名验证码 / 是否缴费 / 缴费状态原因
+
+操作列走 `funBm(url, msg)` → `openWindow(url, 760, 550)` 弹窗报名。当学期没有社会考试时两张表都是「未查询到数据」，属正常。
+
+**注意**：这个页面和「等级考试成绩」`kscj/cjcx_djkscx` 不是一回事——后者始终返回「非法访问」（772B），可能不对学生开放。
 
 ## 9. 编码处理
 
@@ -220,6 +235,7 @@ def dec(resp):
 | 学生选课中心 | `xsxk/xklc_list` | `xsxk/xsxk_index` |
 | 学生预选管理 | `xkgl/xsyxgl` | `xkgl/xsyxxk` |
 | 辅修报名 | `fxgl/fxbmxx_query` | `fxgl/fxbmxx` |
+| 社会考试报名 | `xsdjks/xsdjks_list` | 操作走 `funBm()` 弹窗，非独立接口 |
 | 教学进度查询 | `xkgl/skjhQuery.do` | `xkgl/skjhxx` |
 | 实践环节 | `view/syjx/syyy_find.jsp` | `syjx/findSyYyKc.do` |
 | 班级课表 | `kbcx/kbxx_xzb` | `kbcx/kbxx_xzb_ifr` |
@@ -233,7 +249,9 @@ def dec(resp):
 
 ## E. 确认失效的路径
 
-- `kscj/cjcx_djkscx` → 772B「非法访问」（等级考试成绩，可能本学期未开放）
+- `kscj/cjcx_djkscx` → 772B「非法访问」（等级考试成绩）
+- `kscj/djkscx_query`、`kscj/cjcx_djkscx_query` → 同样 772B
+- 三个变体都试过，判断为**该功能不对学生账号开放**，不是参数问题
 
 ## F. 探测方法（可复现）
 

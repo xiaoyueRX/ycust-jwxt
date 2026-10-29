@@ -220,6 +220,14 @@ def align_grade_row(cs):
             "gpa": gpa, "exam": exam, "attr": attr, "mod": mod}
 
 
+def s_get(url, timeout=30):
+    return dec(G_S.get(BASE + url, timeout=timeout))
+
+
+def s_post(url, data, timeout=30):
+    return dec(G_S.post(BASE + url, data=data or {}, timeout=timeout))
+
+
 # ---------------- 各功能 ----------------
 
 def cmd_doctor(s=None):
@@ -637,6 +645,134 @@ def cmd_page(s, key=None):
         print("  （页面无表格数据）")
 
 
+# ==================== 各菜单页专用命令 ====================
+
+def _tab(url, post=None, timeout=30):
+    """取页面并解析所有表格，返回 [(head, rows)]"""
+    r = s_post(url, post, timeout) if post else s_get(url, timeout)
+    t = r if isinstance(r, str) else dec(r)
+    out = []
+    for tb in re.findall(r"<table[^>]*>.*?</table>", t, flags=re.S | re.I):
+        head, rows = [], []
+        for tr in re.findall(r"<tr[^>]*>(.*?)</tr>", tb, flags=re.S | re.I):
+            cs = [re.sub(r"\s+", " ", html.unescape(re.sub(r"<[^>]+>", "", x))).strip()
+                  for x in re.findall(r"<t[dh][^>]*>(.*?)</t[dh]>", tr, flags=re.S | re.I)]
+            cs = [c for c in cs if c]
+            if not cs: continue
+            if not head: head = cs
+            else: rows.append(cs)
+        # 过滤伪表格：表头是下拉框选项串（含「请选择」或「第1周」等）
+        joined = " ".join(head)
+        if "请选择" in joined or "第1周" in joined or len(joined) > 200:
+            continue
+        if head and rows: out.append((head, rows))
+    return out, t
+
+
+def _show(tabs, limit=200, title=""):
+    if title: print(f"  {title}\n")
+    if not tabs:
+        print("  无数据")
+        return
+    for head, rows in tabs:
+        print("  " + " | ".join(head))
+        print("  " + "-" * 64)
+        for r in rows[:limit]:
+            print("  " + " | ".join(r))
+        if len(rows) > limit:
+            print(f"  ... 共 {len(rows)} 行")
+        print()
+
+
+def cmd_plan(s, term=None):
+    """执行计划 —— 本学期开课一览（含是否考试）"""
+    tabs, _ = _tab("/pyfa/pyfa_query")
+    if term:
+        tabs = [(h, [r for r in rows if any(term in c for c in r)]) for h, rows in tabs]
+        tabs = [(h, rows) for h, rows in tabs if rows]
+    _show(tabs, title="执行计划")
+
+
+def cmd_teaching(s, term="2026-2027-1"):
+    """教学进度 —— 授课计划"""
+    tabs, _ = _tab("/xkgl/skjhxx", {"xnxqid": term})
+    _show(tabs, title=f"教学进度 {term}")
+
+
+def cmd_society(s):
+    """社会考试报名 —— 可报名 + 已报名"""
+    tabs, _ = _tab("/xsdjks/xsdjks_list")
+    if not tabs:
+        print("  无社会考试信息")
+        return
+    names = ["可报名的社会考试", "已报名的社会考试"]
+    for i, (head, rows) in enumerate(tabs):
+        print(f"  【{names[i] if i < len(names) else '表格'+str(i+1)}】")
+        print("  " + " | ".join(head))
+        for r in rows:
+            print("  " + " | ".join(r))
+        print()
+
+
+def cmd_textbook(s, term=None):
+    """教材账目"""
+    tabs, _ = _tab("/xsjc/xsjc")
+    _show(tabs, title="教材账目")
+
+
+def cmd_eval(s):
+    """教学评价 —— 待评 / 已评"""
+    tabs, _ = _tab("/xspj/xspj_find.do")
+    _show(tabs, title="教学评价")
+
+
+def cmd_exchange(s):
+    """交流申请"""
+    tabs, _ = _tab("/jlsgl/jlxm_find.do")
+    _show(tabs, title="交流申请")
+
+
+def cmd_notice(s, kind="公告"):
+    """通知公告 / 留言"""
+    path = "/ggly/ysgg_query" if "公告" in kind else "/ggly/ysly_query"
+    tabs, _ = _tab(path)
+    _show(tabs, title=kind)
+
+
+def cmd_practice(s, term=None):
+    """实践环节 —— 实验预约"""
+    tabs, _ = _tab("/view/syjx/syyy_find.jsp")
+    _show(tabs, title="实践环节")
+
+
+def cmd_labtable(s, term=None):
+    """实验课表"""
+    url = "/syjx/toXskb.do" + (f"?xnxq01id={term}" if term else "")
+    tabs, t = _tab(url)
+    if not tabs:
+        print("  实验课表为空（本学期可能无实验课）")
+        return
+    _show(tabs, title="实验课表")
+
+
+def cmd_preselect(s):
+    """学生预选管理"""
+    tabs, _ = _tab("/xkgl/xsyxgl")
+    _show(tabs, title="预选管理")
+
+
+def cmd_minor(s, term=None):
+    """辅修报名"""
+    tabs, _ = _tab("/fxgl/fxbmxx_query")
+    _show(tabs, title="辅修报名")
+
+
+def cmd_xjxx(s):
+    """学籍信息管理 —— 信息修改申请记录"""
+    tabs, _ = _tab("/xsxj/xjxxgl.do")
+    _show(tabs, title="学籍信息修改记录")
+
+
 def cmd_missing(s):
     """未获得学分/未修课程 —— 比 progress 更官方、更直接"""
     r = s.post(BASE + "/kscj/whdxfcx_list",
@@ -806,7 +942,9 @@ def cmd_grab(s, at=None, want=None, credit=None):
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("cmd", choices=["login", "alive", "keepalive", "info", "grades",
-                                    "timetable", "exams", "progress", "missing", "hours", "calendar", "page", "rounds", "grab", "doctor"])
+                                    "timetable", "exams", "progress", "missing", "hours", "calendar", "page", "plan", "teaching", "society", "textbook",
+                                    "eval", "exchange", "notice", "practice", "labtable",
+                                    "preselect", "minor", "xjxx", "rounds", "grab", "doctor"])
     ap.add_argument("arg", nargs="?", default=None, help="学期参数")
     ap.add_argument("-u", "--user"); ap.add_argument("-p", "--pwd")
     ap.add_argument("--gpa", action="store_true")
@@ -817,6 +955,7 @@ if __name__ == "__main__":
     globals()["RAW"] = a.raw
 
     s = newsess()
+    globals()["G_S"] = s
 
     if a.cmd == "doctor":
         sys.exit(cmd_doctor())
@@ -850,5 +989,17 @@ if __name__ == "__main__":
      "hours": lambda: cmd_hours(s, term),
      "calendar": lambda: cmd_calendar(s, term),
      "page": lambda: cmd_page(s, term),
+     "plan": lambda: cmd_plan(s, term),
+     "teaching": lambda: cmd_teaching(s, term or "2026-2027-1"),
+     "society": lambda: cmd_society(s),
+     "textbook": lambda: cmd_textbook(s, term),
+     "eval": lambda: cmd_eval(s),
+     "exchange": lambda: cmd_exchange(s),
+     "notice": lambda: cmd_notice(s, term or "公告"),
+     "practice": lambda: cmd_practice(s, term),
+     "labtable": lambda: cmd_labtable(s, term),
+     "preselect": lambda: cmd_preselect(s),
+     "minor": lambda: cmd_minor(s, term),
+     "xjxx": lambda: cmd_xjxx(s),
      "rounds": lambda: cmd_rounds(s),
      "grab": lambda: cmd_grab(s, a.at, a.want, a.credit)}[a.cmd]()

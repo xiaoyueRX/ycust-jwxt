@@ -17,7 +17,23 @@
 """
 import sys, os, re, time, json, base64, html, argparse
 from datetime import datetime
-import requests
+
+try:
+    import requests
+except ImportError:
+    sys.stderr.write("""
+  ❌ 缺少依赖 requests
+
+  请先安装：
+      pip install requests
+
+  如果 pip 不可用，可以试：
+      python3 -m pip install --user requests
+      pip3 install requests
+
+  装好后重新运行本命令。
+""")
+    sys.exit(2)
 
 BASE  = "http://jw.ycust.com/yckjxy_jsxsd"
 # 会话文件位置：优先用工作区，取不到就退回脚本所在目录
@@ -106,10 +122,31 @@ def ask_credentials(user=None, pwd=None):
     return user, pwd
 
 
+def check_net():
+    """登录前先探一次网络，避免把网络问题报成密码错误"""
+    try:
+        s = requests.get(BASE + "/", timeout=8)
+        return True
+    except requests.exceptions.ConnectTimeout:
+        print("\n❌ 连接教务系统超时。可能原因：")
+        print("   · 当前网络不通（校园网/VPN 未连接）")
+        print("   · 教务系统维护中")
+        print("   请确认能打开 http://jw.ycust.com/yckjxy_jsxsd/")
+        return False
+    except requests.exceptions.ConnectionError:
+        print("\n❌ 无法连接教务系统 jw.ycust.com。请检查网络。")
+        return False
+    except Exception as e:
+        print(f"\n❌ 网络异常：{type(e).__name__}")
+        return False
+
+
 def do_login(s, user=None, pwd=None):
     user, pwd = ask_credentials(user, pwd)
     if not user or not pwd:
         print("❌ 未提供凭据，无法登录")
+        return False
+    if not check_net():
         return False
     s.get(BASE + "/", timeout=15)
     enc = (base64.b64encode(user.encode()).decode() + "%%%" +
@@ -512,7 +549,7 @@ if __name__ == "__main__":
 
     if a.cmd == "login":
         ok = do_login(s, a.user, a.pwd)
-        print("✅ 登录成功，session 已保存" if ok else "❌ 登录失败")
+        print("✅ 登录成功，session 已保存" if ok else "❌ 登录失败：学号或密码不正确")
         sys.exit(0 if ok else 1)
     if a.cmd == "alive":
         load_ck(s); ok = logged_in(s)

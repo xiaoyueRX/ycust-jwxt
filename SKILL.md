@@ -199,3 +199,105 @@ python3 /skills/ycust-jwxt/scripts/jw.py grab --at 12:00:00 --want "课程A,课�
 | 课表空白 | `xnxq01id` 格式错，应为 `2026-2027-1` |
 
 页面编码混杂（`utf-8` / `gbk`），`jw.py` 已处理；自己写代码要逐个尝试解码。
+
+## 选课（2026-10-30 实战验证）
+
+### 完整调用链
+
+```
+1. POST /xk/LoginToXk                    allow_redirects=False，302 即成功
+2. GET  /xsxk/xklc_view?jx0502zbid=<RID>      轮次公告页，>8000B 为真页面
+3. GET  /xsxk/xsxk_index?jx0502zbid=<RID>     ★ 选课上下文，不能省
+4. GET  /xsxkkc/comeInGgxxkxk                 选课页，>4000B 为真页面
+5. POST /xsxkkc/ggxxkxkOper?kcid=<kcid>&cfbs=
+        body: jx0404id=<jid>&xkzy=&trjf=
+```
+
+命令：
+
+```bash
+jw.py xkresult <轮次ID>                                    # 查已选
+jw.py xklist                                               # 从存档读课程
+jw.py xkfetch <轮次ID>                                     # 抓课程列表（仅开放期可用）
+jw.py xkgrab <轮次ID> --kcid <kcid> --jid <jx0404id>       # 提交（推荐）
+```
+
+### 六条铁律
+
+**① 登录必须 `allow_redirects=False`**
+
+只要 302 就是成功。跟随跳到 xsMain 那一步高峰期极易 502，会把成功拖成失败。
+
+**② 第 3 步 `xsxk_index` 不能省**
+
+跳过会报 `{"success":false,"message":"当前账号已在别处登录，请重新登录进入选课！"}`
+这**不是真被别人挤下线**，而是缺选课批次上下文。查结果页同样需要它。
+
+**③ 登录后必须一口气跑完**
+
+高峰期 session 存活极短。实测：
+- 登录后立刻执行 → 成功
+- 登录后隔 30 秒 → 变回 5068B 登录页
+
+**④ 每步独立重试**
+
+```bash
+# 错：某步失败导致整轮重来
+# 对：login_retry; view_retry; index_retry; submit_retry
+```
+
+**⑤ 按返回体积判断真伪**
+
+| 大小 | 是什么 |
+|---|---|
+| 494B | nginx 502 错误页 |
+| 5068B | 登录页（session 失效）|
+| 549B | 「当前账号已在别处登录」|
+| 9756B | xklc_view 真页面 |
+| 3727B | xsxk_index 框架页 |
+| 14214B | comeInGgxxkxk 真页面 |
+| 31049B | 课程列表 JSON |
+
+**⑥ 课程列表接口有时效**
+
+`/xsxkkc/xsxkGgxxkxk` 有三种表现：
+
+| 状态 | 说明 |
+|---|---|
+| 返回 `{aaData:[...]}` | 正常，选课开放期 |
+| 返回 404 | 接口不可用，过了开放期 |
+| 返回 `{"flag1":2,"msgContent":"请先登录系统"}` | 会话状态不对 |
+
+**结论：开放瞬间立刻用 `xkfetch` 存档**，之后用 `xklist` 从存档读。
+
+### 提交参数从哪来
+
+课程列表 JSON 里：
+
+| 字段 | 用途 |
+|---|---|
+| `jx02id` | **kcid**，提交 URL 参数 |
+| `jx0404id` | **jx0404id**，提交 body 参数 |
+| `kch` / `kcmc` / `xf` | 课程号 / 名称 / 学分 |
+| `xkrs` / `pkrs` / `syrs` | 已选 / 总名额 / 剩余 |
+
+**注意 `kcid` 来自 `jx02id` 字段**，不要和 `jx0404id` 搞混。
+
+### 高峰期实测
+
+| 项目 | 数值 |
+|---|---|
+| 首页 502 率（12:00-13:00）| ~70% |
+| 单次登录成功概率 | ~15% |
+| 完整流程所需尝试 | 5~15 次 |
+| 平时 502 率 | 0% |
+
+**502 是常态，不是账号问题。** 看到就重试，别怀疑密码。
+
+### 轮次 ID
+
+全校通用，不是个人 ID。来源：
+- 浏览器地址栏 `jx0502zbid=<ID>`
+- `xklc_view` 页面里的「进入选课」链接
+
+`xklc_list` 未开放时只有「未查询到数据」，此时从浏览器拿 ID。

@@ -87,12 +87,22 @@ def load_ck(s):
     except Exception:
         return False
 
-def logged_in(s):
-    try:
-        r = s.get(BASE + "/framework/xsMain.jsp", timeout=12)
-        return "学生个人中心" in dec(r)
-    except Exception:
-        return False
+def logged_in(s, tries=3):
+    """检查登录态。高峰期单次请求容易超时，重试几次再判定"""
+    for i in range(tries):
+        try:
+            r = s.get(BASE + "/framework/xsMain.jsp", timeout=20)
+            t = dec(r)
+            if "学生个人中心" in t:
+                return True
+            if "用户登录" in t or len(t) < 6000:
+                # 明确的未登录
+                return False
+        except Exception:
+            pass
+        if i < tries - 1:
+            time.sleep(1)
+    return False
 
 def ask_credentials(user=None, pwd=None):
     """首次使用必须由用户提供账号密码。不接受任何硬编码/环境变量兜底。"""
@@ -142,22 +152,42 @@ def check_net():
         return False
 
 
-def do_login(s, user=None, pwd=None):
+def do_login(s, user=None, pwd=None, tries=15, quiet=False):
+    """登录。
+    关键: allow_redirects=False —— 只要拿到 302 就说明凭证正确、cookie 已下发。
+    不要跟随跳转到 xsMain.jsp，那一步在高峰期极易 502，会把成功拖成失败。
+    """
     user, pwd = ask_credentials(user, pwd)
     if not user or not pwd:
         print("❌ 未提供凭据，无法登录")
         return False
-    if not check_net():
-        return False
-    s.get(BASE + "/", timeout=15)
     enc = (base64.b64encode(user.encode()).decode() + "%%%" +
            base64.b64encode(pwd.encode()).decode())
-    r = s.post(BASE + "/xk/LoginToXk",
-               data={"encoded": enc, "jzmmid": "1"},
-               headers={"Referer": BASE + "/"}, allow_redirects=True, timeout=20)
-    ok = ("学生个人中心" in dec(r)) or ("xsMain" in r.url)
-    if ok: save_ck(s)
-    return ok
+    try:
+        s.get(BASE + "/", timeout=8)
+    except Exception:
+        pass
+
+    for attempt in range(tries):
+        try:
+            r = s.post(BASE + "/xk/LoginToXk",
+                       data={"encoded": enc, "jzmmid": "1"},
+                       headers={"Referer": BASE + "/"},
+                       allow_redirects=False, timeout=15)
+            # 302 = 登录成功（凭证正确，cookie 已下发）
+            if r.status_code == 302:
+                loc = r.headers.get("Location", "")
+                if "xsMain" in loc or loc.count("/") > 0:
+                    save_ck(s)
+                    globals()["_CUR_UID"] = user
+                    if attempt and not quiet:
+                        print(f"  （第 {attempt+1} 次尝试成功）")
+                    return True
+        except Exception:
+            pass
+        time.sleep(0.8)
+    return False
+
 
 def ensure(s):
     """复用 session，失效才登录"""
@@ -884,58 +914,358 @@ def cmd_progress(s):
             print(f"    未通过: {m['name'][:30]:<32}{m['credit']:>5} 学分")
         print()
 
+# ==================== 选课（实战验证版 2026-10-30）====================
+
+XK_RID_HINT = "轮次ID从 /xsxk/xklc_list 或浏览器地址栏 jx0502zbid= 取"
+
+
+def _xk_get(s, path, tries=6, need=8000, tag=""):
+    """带重试的 GET，返回 (html, ok)
+    高峰期 502 率约 70%，必须多试
+    """
+    last = ""
+    for i in range(tries):
+        try:
+            t = dec(s.get(BASE + path, timeout=18, headers={"Referer": BASE + "/xsxk/xklc_list"}))
+        except Exception:
+            t = ""
+        if len(t) > need and "用户登录" not in t:
+            return t, True
+        if t:
+            last = f"{len(t)}B"
+        time.sleep(1)
+    return last, False
+
+
+def _xk_post(s, path, data, tries=8):
+    """POST 并解析 JSON。
+    注意: 课程列表接口返回 {aaData:[...]}，没有 success 字段；
+    提交接口返回 {success:true,...}。两种都要认。
+    """
+    for i in range(tries):
+        try:
+            r = s.post(BASE + path, data=data, timeout=30,
+                       headers={"Referer": BASE + "/xsxkkc/comeInGgxxkxk"})
+            t = dec(r).strip()
+            if t.startswith("{") or t.startswith("["):
+                try:
+                    obj = json.loads(t)
+                    if isinstance(obj, dict):
+                        return obj, True
+                except Exception:
+                    pass
+            if "选课成功" in t:
+                return {"success": True, "message": "选课成功"}, True
+        except Exception:
+            pass
+        time.sleep(1)
+    return {}, False
+
+
 def cmd_rounds(s):
+    """查选课轮次
+    注意: /xsxk/xklc_list 在未开放时只有「未查询到数据」，
+    真正入口在 /xsxk/xklc_view?jx0502zbid=<ID>
+    """
     t = dec(s.get(BASE + "/xsxk/xklc_list", timeout=20))
-    rs = list(dict.fromkeys(re.findall(r"comeInXkIndx\('([^']+)'\)", t)))
+    if "未查询到数据" in t:
+        # 尝试从会话里找已知轮次
+        print("  xklc_list 无数据（可能未开放，或轮次入口不在这个页面）")
+        print(f"  提示: {XK_RID_HINT}")
+        return []
+    rs = list(dict.fromkeys(re.findall(r"jx0502zbid=([A-Z0-9]{20,})", t)))
+    rs += list(dict.fromkeys(re.findall(r"comeInXkIndx\('([^']+)'\)", t)))
+    rs = list(dict.fromkeys(rs))
     if not rs:
-        print("无选课轮次（未开放）")
-        if "未查询到数据" in t: print("  页面提示：未查询到数据")
-    else:
-        for r in rs: print(f"  轮次 id = {r}")
+        print("  未找到轮次ID")
+        print(f"  提示: {XK_RID_HINT}")
+    for r in rs:
+        print(f"  轮次 id = {r}")
     return rs
 
-def cmd_grab(s, at=None, want=None, credit=None):
+
+def cmd_xklist(s, rid=None):
+    """查可选课程
+
+    ⚠ 重要发现（2026-10-30 实测）：
+      /xsxkkc/xsxkGgxxkxk 这个课程列表接口在选课开放首小时可用（返回 JSON），
+      之后就变成 404 或 {"flag1":2,"msgContent":"请先登录系统"}。
+      原因不明，推测与选课批次时效或会话状态有关。
+
+    可靠的做法：在选课开放时立刻把列表存下来，之后从存档读。
+    脚本会自动读取 /workspace/xk/data/courses_*.json
+    """
+    import glob
+    files = sorted(glob.glob(os.path.join(WD, "..", "xk", "data", "courses_*.json")))
+    files += sorted(glob.glob("/workspace/xk/data/courses_*.json"))
+    if files:
+        f = files[-1]
+        try:
+            d = json.load(open(f, encoding="utf-8"))
+            rows = d.get("aaData") or []
+            print(f"  从存档读取: {f}（{len(rows)} 门）\n")
+            print(f"  {'课程号':<12}{'课程名':<26}{'学分':>4}{'剩余':>6}")
+            print("  " + "-" * 52)
+            for r in rows:
+                print(f"  {str(r.get('kch',''))[:11]:<12}{str(r.get('kcmc',''))[:24]:<26}"
+                      f"{str(r.get('xf','')):>4}{str(r.get('syrs','')):>6}")
+            print()
+            print("  提交参数：")
+            for r in rows:
+                if str(r.get("xf")) in ("2", "1.5"):
+                    print(f"    {str(r.get('kcmc',''))[:22]:<24} "
+                          f"--kcid {r.get('jx02id')} --jid {r.get('jx0404id')}")
+            return
+        except Exception as e:
+            print("  存档读取失败:", e)
+
+    print("  无课程列表存档。")
+    print("  课程列表接口只在选课开放期间可用，请在开放时运行：")
+    print("    jw.py xkfetch <轮次ID>    （抓取并保存课程列表）")
+    print()
+    print("  或从浏览器 F12 → Network → xsxkGgxxkxk 的响应里抄 kcid / jx0404id")
+
+
+def cmd_xkfetch(s, rid=None):
+    """抓取课程列表并存档（仅选课开放期间可用）"""
+    if not rid:
+        print("  用法: jw.py xkfetch <轮次ID>")
+        return
+    print("  1/3 轮次页...", flush=True)
+    v, ok = _xk_get(s, f"/xsxk/xklc_view?jx0502zbid={rid}", need=8000, tries=10)
+    print(f"      {'OK' if ok else '失败'}", flush=True)
+    if not ok: return
+    print("  2/3 选课上下文...", flush=True)
+    i, ok2 = _xk_get(s, f"/xsxk/xsxk_index?jx0502zbid={rid}", need=2500, tries=10)
+    print(f"      {'OK' if ok2 else '失败'}", flush=True)
+    if not ok2: return
+    print("  3/3 选课页...", flush=True)
+    g, ok3 = _xk_get(s, "/xsxkkc/comeInGgxxkxk", need=4000, tries=10)
+    print(f"      {'OK' if ok3 else '失败'}", flush=True)
+    if not ok3: return
+
+    body = ("sEcho=1&iColumns=9&sColumns=&iDisplayStart=0&iDisplayLength=500"
+            "&sSearch=&bRegex=false&iSortCol_0=0&sSortDir_0=asc&iSortingCols=1")
+    url = ("/xsxkkc/xsxkGgxxkxk?kcxx=&skls=&skxq=&skjc="
+           "&sfym=false&sfct=false&szjylb=&sfxx=false")
+    print("  拉取列表...", flush=True)
+    for n in range(12):
+        try:
+            r = s.post(BASE + url, data=body, timeout=30,
+                       headers={"Referer": BASE + "/xsxkkc/comeInGgxxkxk",
+                                "X-Requested-With": "XMLHttpRequest"})
+            t = r.text.strip()
+            if t.startswith("{"):
+                d = json.loads(t)
+                rows = d.get("aaData") or []
+                if rows:
+                    dd = os.path.join(os.path.dirname(os.path.abspath(CK)), "..", "xk", "data")
+                    dd = os.path.abspath(dd)
+                    os.makedirs(dd, exist_ok=True)
+                    fn = os.path.join(dd, f"courses_{rid[:8]}.json")
+                    json.dump(d, open(fn, "w", encoding="utf-8"), ensure_ascii=False)
+                    print(f"      ★ 成功 {len(rows)} 门 → {fn}", flush=True)
+                    return
+            time.sleep(1)
+        except Exception:
+            time.sleep(1)
+    print("      列表接口不可用（仅选课开放期间可用）", flush=True)
+
+
+def cmd_xkresult(s, rid=None):
+    """查已选课程结果（需先建选课上下文）"""
+    if not rid:
+        print("  用法: jw.py xkresult <轮次ID>")
+        return
+    print("  1/3 轮次页...", flush=True)
+    v, ok = _xk_get(s, f"/xsxk/xklc_view?jx0502zbid={rid}", need=8000)
+    print(f"      {'OK' if ok else '失败'}", flush=True)
+    if not ok:
+        return
+    print("  2/3 选课上下文...", flush=True)
+    i, ok2 = _xk_get(s, f"/xsxk/xsxk_index?jx0502zbid={rid}", need=2500)
+    print(f"      {'OK' if ok2 else '失败'}", flush=True)
+    if not ok2:
+        return
+    print("  3/3 选课结果...", flush=True)
+    for n in range(6):
+        try:
+            t = dec(s.get(BASE + "/xsxkjg/comeXkjglb", timeout=20))
+        except Exception:
+            t = ""
+        if len(t) > 5000:
+            break
+        time.sleep(1)
+    if len(t) <= 5000:
+        print("      查询失败（服务器繁忙）")
+        return
+    print()
+    cnt = 0
+    for tr in re.findall(r"<tr[^>]*>(.*?)</tr>", t, flags=re.S | re.I):
+        cs = [re.sub(r"\s+", " ", html.unescape(re.sub(r"<[^>]+>", "", x))).strip()
+              for x in re.findall(r"<t[dh][^>]*>(.*?)</t[dh]>", tr, flags=re.S | re.I)]
+        cs = [c for c in cs if c]
+        if len(cs) >= 6 and ("选中" in cs or "退选" in cs):
+            cnt += 1
+            print("  " + " | ".join(cs[:8]))
+    print(f"\n  共 {cnt} 门已选")
+
+
+def cmd_xkgrab(s, rid=None, want=None, at=None, kcid=None, jid=None):
+    """抢课（实战验证流程）
+
+    两种用法：
+      jw.py xkgrab <轮次ID> --kcid <kcid> --jid <jx0404id>   ← 推荐，直接提交
+      jw.py xkgrab <轮次ID> --want "课程名"                   ← 需列表接口，可能失效
+    """
+
+    def hms(x):
+        p = (x.split(":") + ["0", "0"])[:3]
+        return int(p[0]), int(p[1]), int(p[2])
+
+    if at:
+        h, m, sec = hms(at)
+        tgt = datetime.now().replace(hour=h, minute=m, second=sec, microsecond=0)
+        print(f"  卡点 {tgt:%H:%M:%S}")
+        while datetime.now() < tgt:
+            time.sleep(0.2)
+
+    if not rid:
+        print("  用法: jw.py xkgrab <轮次ID> --kcid <kcid> --jid <jx0404id>")
+        return
+
+    # 直接提交模式
+    if kcid and jid:
+        print(f"  直接提交 kcid={kcid} jid={jid}", flush=True)
+        print("  [1] 轮次页...", flush=True)
+        v, ok = _xk_get(s, f"/xsxk/xklc_view?jx0502zbid={rid}", need=8000)
+        print(f"      {'OK' if ok else '失败'}", flush=True)
+        if not ok: return False
+        print("  [2] 选课上下文...", flush=True)
+        i, ok2 = _xk_get(s, f"/xsxk/xsxk_index?jx0502zbid={rid}", need=2500)
+        print(f"      {'OK' if ok2 else '失败'}", flush=True)
+        if not ok2: return False
+        print("  [3] 选课页...", flush=True)
+        g, ok3 = _xk_get(s, "/xsxkkc/comeInGgxxkxk", need=4000)
+        print(f"      {'OK' if ok3 else '失败'}", flush=True)
+        if not ok3: return False
+
+        print("  [4] 提交...", flush=True)
+        for n in range(12):
+            try:
+                r = s.post(BASE + f"/xsxkkc/ggxxkxkOper?kcid={kcid}&cfbs=",
+                           data=f"jx0404id={jid}&xkzy=&trjf=", timeout=25,
+                           headers={"Referer": BASE + "/xsxkkc/comeInGgxxkxk"})
+                txt = r.text.strip()
+                print(f"      [{n}] {r.status_code} {txt[:100]}", flush=True)
+                if txt.startswith("{"):
+                    res = json.loads(txt)
+                    if res.get("success"):
+                        print("      ★★★ 选课成功", flush=True)
+                        return True
+                    msg = str(res.get("message") or res.get("msgContent") or "")
+                    if msg and msg != "None":
+                        if "已选" in msg or "重复" in msg or "已经" in msg:
+                            print("      （已选过，算成功）", flush=True)
+                            return True
+                        if "别处登录" in msg:
+                            print("      → 会话被挤，需重登", flush=True)
+                            return False
+            except Exception as e:
+                print(f"      [{n}] {type(e).__name__}", flush=True)
+            time.sleep(1)
+        return False
+
+    names = [x.strip() for x in (want or "").split(",") if x.strip()]
+    if not names:
+        print("  请用 --want 指定课程名，或用 --kcid/--jid 直接提交")
+        return
+
     if at:
         hh, mm, ss = (at.split(":") + ["0", "0"])[:3]
         tgt = datetime.now().replace(hour=int(hh), minute=int(mm),
                                      second=int(float(ss)), microsecond=0)
-        print(f"卡点 {tgt:%H:%M:%S}")
+        print(f"  卡点 {tgt:%H:%M:%S}")
         while datetime.now() < tgt:
-            time.sleep(0.05)
-    names = [x.strip() for x in (want or "").split(",") if x.strip()]
-    n = 0
-    while True:
-        n += 1
-        rs = []
-        try:
-            t = dec(s.get(BASE + "/xsxk/xklc_list", timeout=12))
-            rs = list(dict.fromkeys(re.findall(r"comeInXkIndx\('([^']+)'\)", t)))
-        except Exception:
-            pass
-        for rid in rs:
-            for u in (f"{BASE}/xsxk/xsxk_index?jx0502zbid={rid}",
-                      f"{BASE}/xsxk/xsxk_index.jsp?jx0502zbid={rid}"):
-                try:
-                    r = s.get(u, timeout=12, headers={"Referer": BASE + "/xsxk/xklc_list"})
-                    page = dec(r)
-                    if len(page) < 800 or "非法访问" in page: continue
-                    open(os.path.join(WD, ".jw_last_page.html"), "w", encoding="utf-8").write(page)
-                    print(f"  轮次{rid} 页面已存档，{len(page)} 字节")
-                    for nm in names:
-                        for tr in re.findall(r"<tr[^>]*>(.*?)</tr>", page, re.S | re.I):
-                            if nm in tr:
-                                for a in re.findall(r"""href=["']([^"']+)["']""", tr, re.I):
-                                    if a.startswith("javascript:") or a == "#": continue
-                                    url = a if a.startswith("http") else BASE + "/" + a.lstrip("/")
-                                    rr = s.get(url, timeout=10, headers={"Referer": u})
-                                    body = dec(rr)
-                                    if any(k in body for k in ("成功", "已选")):
-                                        print(f"  ★ 抢到: {nm}")
-                                        return True
-                except Exception:
-                    pass
-        if n % 20 == 0: print(f"  等待轮次... (第{n}次)")
-        time.sleep(0.35)
+            time.sleep(0.2)
+    print(f"  目标: {','.join(names)}", flush=True)
+
+    # 1) 轮次页
+    print("  [1] 轮次页...", flush=True)
+    v, ok = _xk_get(s, f"/xsxk/xklc_view?jx0502zbid={rid}", need=8000)
+    print(f"      {'OK' if ok else '失败'}", flush=True)
+    if not ok:
+        return
+    # 2) 选课上下文
+    print("  [2] 选课上下文...", flush=True)
+    i, ok2 = _xk_get(s, f"/xsxk/xsxk_index?jx0502zbid={rid}", need=2500)
+    print(f"      {'OK' if ok2 else '失败'}", flush=True)
+    if not ok2:
+        return
+    # 3) 选课页
+    print("  [3] 选课页...", flush=True)
+    g, ok3 = _xk_get(s, "/xsxkkc/comeInGgxxkxk", need=4000)
+    print(f"      {'OK' if ok3 else '失败'}", flush=True)
+    if not ok3:
+        return
+    # 4) 拉列表找目标
+    print("  [4] 拉课程列表...", flush=True)
+    body = ("sEcho=1&iColumns=9&sColumns=&iDisplayStart=0&iDisplayLength=300"
+            "&sSearch=&bRegex=false&iSortCol_0=0&sSortDir_0=asc&iSortingCols=1")
+    url = ("/xsxkkc/xsxkGgxxkxk?kcxx=&skls=&skxq=&skjc="
+           "&sfym=false&sfct=false&szjylb=&sfxx=false")
+    data, ok4 = _xk_post(s, url, body)
+    rows = data.get("aaData") or [] if ok4 else []
+    if not rows:
+        print("      列表拉取失败")
+        return
+
+    targets = []
+    for r in rows:
+        nm = str(r.get("kcmc", ""))
+        for n in names:
+            if n in nm:
+                targets.append(r)
+                break
+    if not targets:
+        print(f"      未找到目标课程，可选共 {len(rows)} 门")
+        for r in rows[:10]:
+            print(f"        {r.get('kcmc')}")
+        return
+
+    print(f"      找到 {len(targets)} 门目标课", flush=True)
+    for r in targets:
+        print(f"        {r.get('kcmc')}  kcid={r.get('jx02id')} jid={r.get('jx0404id')} "
+              f"剩余={r.get('syrs')}", flush=True)
+
+    # 5) 提交（按优先级）
+    for r in targets:
+        kcid = r.get("jx02id")
+        jid = r.get("jx0404id")
+        print(f"  [5] 提交 {r.get('kcmc')}...", flush=True)
+        res, ok5 = _xk_post(s, f"/xsxkkc/ggxxkxkOper?kcid={kcid}&cfbs=",
+                            f"jx0404id={jid}&xkzy=&trjf=")
+        msg = res.get("message") or res.get("msg") or str(res)
+        if res.get("success"):
+            print(f"      ★★★ 选课成功: {r.get('kcmc')}", flush=True)
+            return True
+        print(f"      {msg}", flush=True)
+        if "已选" in str(msg) or "重复" in str(msg):
+            print("      （可能已选过）", flush=True)
+            return True
+    print("  全部失败")
+    return False
+
+
+def cmd_grab(s, at=None, want=None, credit=None):
+    """兼容旧命令名：grab 现在等价于 xkgrab，需要轮次ID"""
+    rid = getattr(cmd_grab, "_rid", None)
+    if not rid:
+        print("  grab 需要轮次ID。请用: jw.py xkgrab <轮次ID> --want 课程名")
+        print(f"  {XK_RID_HINT}")
+        return False
+    return cmd_xkgrab(s, rid, want, at, getattr(cmd_grab,"_kcid",None), getattr(cmd_grab,"_jid",None))
+
 
 # ---------------- 入口 ----------------
 
@@ -944,15 +1274,23 @@ if __name__ == "__main__":
     ap.add_argument("cmd", choices=["login", "alive", "keepalive", "info", "grades",
                                     "timetable", "exams", "progress", "missing", "hours", "calendar", "page", "plan", "teaching", "society", "textbook",
                                     "eval", "exchange", "notice", "practice", "labtable",
-                                    "preselect", "minor", "xjxx", "rounds", "grab", "doctor"])
+                                    "preselect", "minor", "xjxx", "rounds", "grab", "doctor",
+                                    "xklist", "xkfetch", "xkresult", "xkgrab"])
     ap.add_argument("arg", nargs="?", default=None, help="学期参数")
     ap.add_argument("-u", "--user"); ap.add_argument("-p", "--pwd")
     ap.add_argument("--gpa", action="store_true")
     ap.add_argument("--term")
     ap.add_argument("--at"); ap.add_argument("--want"); ap.add_argument("--credit", type=float)
     ap.add_argument("--raw", action="store_true", help="显示身份证等敏感字段的完整值")
+    ap.add_argument("--from", dest="frm", default="11:58", help="开始轮询时间，默认 11:58")
+    ap.add_argument("--speed", type=float, default=3.0, help="低频轮询间隔秒，默认 3")
+    ap.add_argument("--boost", type=float, default=0.2, help="发现轮次后的间隔秒，默认 0.2")
+    ap.add_argument("--kcid", default=None, help="课程 kcid（=jx02id），直接提交用")
+    ap.add_argument("--jid", default=None, help="jx0404id，直接提交用")
     a = ap.parse_args()
     globals()["RAW"] = a.raw
+    if a.arg:
+        cmd_grab._rid = a.arg
 
     s = newsess()
     globals()["G_S"] = s
@@ -1002,4 +1340,8 @@ if __name__ == "__main__":
      "minor": lambda: cmd_minor(s, term),
      "xjxx": lambda: cmd_xjxx(s),
      "rounds": lambda: cmd_rounds(s),
-     "grab": lambda: cmd_grab(s, a.at, a.want, a.credit)}[a.cmd]()
+     "grab": lambda: cmd_grab(s, a.at, a.want, a.credit),
+     "xklist": lambda: cmd_xklist(s, a.term or a.arg),
+     "xkfetch": lambda: cmd_xkfetch(s, a.term or a.arg),
+     "xkresult": lambda: cmd_xkresult(s, a.term or a.arg),
+     "xkgrab": lambda: cmd_xkgrab(s, a.term or a.arg, a.want, a.at, a.kcid, a.jid)}[a.cmd]()
